@@ -12,10 +12,8 @@ Use tools like DBeaver and DuckDB to query and explore the generated index.
 ## Usage
 
 ```bash
-pip install folder_indexer
+uv tool install folder_indexer
 
-python3 -m folder_indexer -i /path/to/input/folder -o /path/to/output/folder
-# --or--
 folder_indexer -i /path/to/input/folder -o /path/to/output/folder
 ```
 
