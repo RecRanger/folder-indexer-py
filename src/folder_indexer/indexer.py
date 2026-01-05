@@ -282,19 +282,17 @@ def get_file_info(
             magic_file_type_1 = magic_worker.from_file(file_path)
 
     # SHA256 hash, if file size < 100 KiB
-    with add_time_taken(time_taken_log, "sha256_hash_1"):
+    with add_time_taken(time_taken_log, "sha256_base64"):
         sha256_base64 = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
-            with file_path.open("rb") as f:
-                sha256_hash = hashlib.sha256(f.read()).digest()
-                sha256_base64 = base64.b64encode(sha256_hash).decode("utf-8")
+            sha256_hash = hashlib.sha256(file_path.read_bytes()).digest()
+            sha256_base64 = base64.b64encode(sha256_hash).decode("utf-8")
 
-    with add_time_taken(time_taken_log, "md5_hash_hex_1"):
-        md5_hash_hex = None
+    with add_time_taken(time_taken_log, "md5_hex"):
+        md5_hex = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
-            with file_path.open("rb") as f:
-                md5_hash = hashlib.md5(f.read()).digest()
-                md5_hash_hex = binascii.hexlify(md5_hash).decode("utf-8")
+            md5_hash = hashlib.md5(file_path.read_bytes()).digest()
+            md5_hex = binascii.hexlify(md5_hash).decode("utf-8")
 
     # Append file information to the list
     with add_time_taken(time_taken_log, "append_to_list"):
@@ -306,7 +304,7 @@ def get_file_info(
             "folder_path": file_path_stripped.parent.as_posix(),
             "file_name": file_path_stripped.name,
             "file_size_bytes": file_size,
-            "md5_hex": md5_hash_hex,
+            "md5_hex": md5_hex,
             "sha256_base64": sha256_base64,
             "date_created": date_created,
             "date_modified": date_modified,
@@ -328,6 +326,7 @@ def save_to_parquet(file_data: list[dict[str, Any]], output_folder: Path) -> Non
             "folder_path": pl.String,
             "file_name": pl.String,
             "file_size_bytes": pl.UInt64,
+            "md5_hex": pl.String,
             "sha256_base64": pl.String,
             "date_created": pl.Datetime,
             "date_modified": pl.Datetime,
