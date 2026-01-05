@@ -1,37 +1,42 @@
-import os
-import hashlib
-import base64
-from datetime import datetime, timedelta
 import argparse
-from pathlib import Path
-from contextlib import contextmanager
+import base64
 import binascii
+import contextlib
+import hashlib
 import itertools
-from dataclasses import dataclass
-import uuid
+import os
 import shutil
+import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from loguru import logger
 import magic
 import polars as pl
+from loguru import logger
 from tqdm import tqdm
 
 BIG_FILE_SIZE_THRESHOLD_BYTES = 512 * 1024  # 512 KiB
 ENABLE_STORING_LAST_100_BYTES = False
 DATETIME_FORMAT_FILES = "%Y-%m-%d_%H-%M-%SZ"
 
-indexing_start_timestamp = datetime.utcnow()
+indexing_start_timestamp = datetime.now(timezone.utc)
 
 
 @contextmanager
-def add_time_taken(time_taken_store: dict[str, timedelta], key_name: str):
-    start_time = datetime.utcnow()
+def add_time_taken(
+    time_taken_store: dict[str, timedelta],
+    key_name: str,
+) -> Generator[None, None, None]:
+    start_time = datetime.now(timezone.utc)
     try:
         yield
     finally:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         elapsed: timedelta = end_time - start_time
-        if key_name in time_taken_store.keys():
+        if key_name in time_taken_store:
             time_taken_store[key_name] += elapsed
         else:
             time_taken_store[key_name] = elapsed
@@ -48,39 +53,39 @@ class CrawlerProgressStoreSingleton:
 
     @property
     def files_per_sec(self) -> float:
-        real_total_time_taken = datetime.utcnow() - indexing_start_timestamp
-        files_per_sec = (
-            self.total_file_count / (real_total_time_taken).total_seconds()
-        )
-        return files_per_sec
+        real_total_time_taken = datetime.now(timezone.utc) - indexing_start_timestamp
+        return self.total_file_count / (real_total_time_taken).total_seconds()
 
     def make_progress_string(self) -> str:
         return " ".join(
             [
-                f"{self.total_file_count:,} files processed @ {self.files_per_sec:.2f} files/sec.",  # noqa
-                f"{self.failed_file_count:,} failed ({self.failed_file_count/self.total_file_count:.2%}).",  # noqa
+                f"{self.total_file_count:,} files processed @ {self.files_per_sec:.2f} files/sec.",  # noqa: E501
+                f"{self.failed_file_count:,} failed ({self.failed_file_count / self.total_file_count:.2%}).",  # noqa: E501
                 f"{self.parquet_saved_count:,} parquets saved.",
                 f"{self.link_file_count:,} links skipped.",
-                f"{self.notfile_file_count:,} notfiles skipped (e.g., named pipes).",  # noqa
+                f"{self.notfile_file_count:,} notfiles skipped (e.g., named pipes).",
                 f"{self.success_file_count:,} successful files indexed.",
-            ]
+            ],
         )
 
 
-def run_file_indexer(
-    input_folder: Path, output_folder: Path, strip_prefix: bool = False
+def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
+    input_folder: Path,
+    output_folder: Path,
+    *,
+    strip_prefix: bool = False,
 ) -> None:
     unwritten_file_data = []
 
     logger.info(f"Crawling {input_folder}...")
 
     progress = CrawlerProgressStoreSingleton()
-    last_progress_log = datetime.utcnow()
+    last_progress_log = datetime.now(timezone.utc)
     time_taken_log: dict[str, timedelta] = {}
 
     logger.info(
         "Pre-counting the total number of files... (press Ctrl-C to abort "
-        "this pre-count and move on)"
+        "this pre-count and move on)",
     )
     with add_time_taken(time_taken_log, "precrawl_file_count"):
         file_counts_in_folders: list[int] = []
@@ -90,19 +95,17 @@ def run_file_indexer(
         except KeyboardInterrupt:
             total_precrawl_file_count = sum(file_counts_in_folders)
             total_precrawl_file_count_is_accurate = False
-            logger.error(
-                "Keyboard interrupt. Exiting pre-crawling file count loop."
-            )
+            logger.error("Keyboard interrupt. Exiting pre-crawling file count loop.")
             logger.info(
                 "Before Keyboard interrupt, already counted "
-                f"{total_precrawl_file_count:,} files."
+                f"{total_precrawl_file_count:,} files.",
             )
         else:
             total_precrawl_file_count = sum(file_counts_in_folders)
             total_precrawl_file_count_is_accurate = True
             logger.info(
                 "Finished pre-counting the total number of files: "
-                f"{total_precrawl_file_count:,} files."
+                f"{total_precrawl_file_count:,} files.",
             )
 
     # Create a generator to go through all files in all subdirectories
@@ -129,48 +132,45 @@ def run_file_indexer(
         progress.total_file_count += 1
 
         # if it's a link, skip it
-        if os.path.islink(file_path):
+        if file_path.is_symlink():
             progress.link_file_count += 1
             continue
 
         # if it's a thing like a named pipe, skip it
-        if not os.path.isfile(file_path):
+        if not file_path.is_file():
             progress.notfile_file_count += 1
             continue
 
         try:
             file_data: dict = get_file_info(
-                file_path=file_path, time_taken_log=time_taken_log
+                file_path=file_path,
+                time_taken_log=time_taken_log,
             )
             unwritten_file_data.append(file_data)
         except KeyboardInterrupt:
             logger.error("Keyboard interrupt. Exiting loop.")
-            logger.info(
-                f"Before Keyboard interrupt, was working on {file_path=}"
-            )
+            logger.info(f"Before Keyboard interrupt, was working on {file_path=}")
             break
         except PermissionError:
             logger.warning(
-                "Permission error. This should never happen! Skipping "
-                f"{file_path=}"
+                f"Permission error. This should never happen! Skipping {file_path=}",
             )
             progress.failed_file_count += 1
             continue
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             progress.failed_file_count += 1
             # if fail_count % 100 == 0:
             logger.debug(
-                f"Failed {progress.failed_file_count:,}/{progress.total_file_count:,} to get file properties (error: {e}). Example: {file_path}"  # noqa
+                f"Failed {progress.failed_file_count:,}/{progress.total_file_count:,} "
+                f"to get file properties (error: {e}). Example: {file_path}",
             )
             continue
 
         with add_time_taken(time_taken_log, "progress_log"):
-            if (datetime.utcnow() - last_progress_log) > timedelta(minutes=1):
-                logger.debug(
-                    "PROGRESS REPORT:"
-                )  # get on a new line from the tqdm bar
+            if (datetime.now(timezone.utc) - last_progress_log) > timedelta(minutes=1):
+                logger.debug("PROGRESS REPORT:")  # get on a new line from the tqdm bar
                 real_total_time_taken = (
-                    datetime.utcnow() - indexing_start_timestamp
+                    datetime.now(timezone.utc) - indexing_start_timestamp
                 )
 
                 logger.info(f"PROGRESS: {progress.make_progress_string()}")
@@ -183,35 +183,37 @@ def run_file_indexer(
                             "time_taken_str": str(v),
                         }
                         for k, v in time_taken_log.items()
-                    ]
+                    ],
                 ).sort("time_taken_sec", descending=True)
-                total_accounted_time_sec = df_time_taken[
-                    "time_taken_sec"
-                ].sum()
+                total_accounted_time_sec = df_time_taken["time_taken_sec"].sum()
                 df_time_taken = df_time_taken.with_columns(
-                    percent_of_accounted=pl.col("time_taken_sec")
-                    / pl.lit(total_accounted_time_sec)
-                    * pl.lit(100),
-                    percent_of_real=pl.col("time_taken_sec")
-                    / pl.lit(real_total_time_taken.total_seconds())
-                    * pl.lit(100),
-                    milliseconds_per_file=pl.col("time_taken_sec")
-                    / pl.lit(progress.total_file_count)
-                    * pl.lit(1000),
+                    percent_of_accounted=(
+                        pl.col("time_taken_sec")
+                        / pl.lit(total_accounted_time_sec)
+                        * pl.lit(100)
+                    ),
+                    percent_of_real=(
+                        pl.col("time_taken_sec")
+                        / pl.lit(real_total_time_taken.total_seconds())
+                        * pl.lit(100)
+                    ),
+                    milliseconds_per_file=(
+                        pl.col("time_taken_sec")
+                        / pl.lit(progress.total_file_count)
+                        * pl.lit(1000)
+                    ),
                 )
-                total_accounted_time = timedelta(
-                    seconds=total_accounted_time_sec
-                )
+                total_accounted_time = timedelta(seconds=total_accounted_time_sec)
                 unaccounted_time = real_total_time_taken - total_accounted_time
                 logger.info(
                     f"TIME TAKEN: {df_time_taken}\n"
                     f"Note: Total accounted time: {total_accounted_time}. "
                     f"Total real time: {real_total_time_taken}. "
                     f"Unaccounted time: {unaccounted_time} "
-                    f"({unaccounted_time/real_total_time_taken:.2%})."
+                    f"({unaccounted_time / real_total_time_taken:.2%}).",
                 )
 
-                last_progress_log = datetime.utcnow()
+                last_progress_log = datetime.now(timezone.utc)
 
         # Save the file data to a Parquet file
         with add_time_taken(time_taken_log, "save_to_parquet"):
@@ -221,7 +223,7 @@ def run_file_indexer(
                     unwritten_file_data,
                     output_folder,
                     input_folder,
-                    strip_prefix,
+                    strip_prefix=strip_prefix,
                 )
                 unwritten_file_data = []
 
@@ -231,7 +233,10 @@ def run_file_indexer(
 
     if len(unwritten_file_data) > 0:
         save_to_parquet(
-            unwritten_file_data, output_folder, input_folder, strip_prefix
+            unwritten_file_data,
+            output_folder,
+            input_folder,
+            strip_prefix=strip_prefix,
         )
     else:
         logger.info(f"No files found in {input_folder}.")
@@ -239,66 +244,58 @@ def run_file_indexer(
     logger.info("Done.")
 
 
-def get_file_info(
-    file_path: Path, time_taken_log: dict[str, timedelta]
-) -> dict:
-
+def get_file_info(file_path: Path, time_taken_log: dict[str, timedelta]) -> dict:
     with add_time_taken(time_taken_log, "stat_file"):
         # Getting file properties
-        stat_info = os.stat(file_path)
+        stat_info = file_path.stat()
 
     with add_time_taken(time_taken_log, "extract_file_info"):
         file_size = stat_info.st_size
-        date_created = datetime.fromtimestamp(stat_info.st_ctime)
-        date_modified = datetime.fromtimestamp(stat_info.st_mtime)
-        # date_accessed = datetime.fromtimestamp(stat_info.st_atime)
+        date_created = datetime.fromtimestamp(stat_info.st_ctime, timezone.utc)
+        date_modified = datetime.fromtimestamp(stat_info.st_mtime, timezone.utc)
 
     # Read the file's first and last 100 bytes
     with add_time_taken(time_taken_log, "read_first_last_100_bytes"):
         first_100_bytes = last_100_bytes = None
         magic_file_type_1 = None
-        try:
-            with open(file_path, "rb") as f:
-                first_100_bytes = f.read(100)
 
-                if ENABLE_STORING_LAST_100_BYTES:
-                    if (file_size > 100) and (
-                        file_size < BIG_FILE_SIZE_THRESHOLD_BYTES
-                    ):
-                        f.seek(-100, os.SEEK_END)
-                    last_100_bytes = f.read(100)
-        except Exception:
-            # If there's an error reading the file, just ignore
-            pass
+        with contextlib.suppress(Exception), file_path.open("rb") as f:
+            # If there's an error reading the file, just ignore.
+            first_100_bytes = f.read(100)
+
+            if ENABLE_STORING_LAST_100_BYTES:
+                if (file_size > 100) and (  # noqa: PLR2004
+                    file_size < BIG_FILE_SIZE_THRESHOLD_BYTES
+                ):
+                    f.seek(-100, os.SEEK_END)
+                last_100_bytes = f.read(100)
 
     with add_time_taken(time_taken_log, "construct_magic_worker"):
         magic_worker = magic.Magic()
 
     if first_100_bytes:
-        with add_time_taken(
-            time_taken_log, "magic_file_type_1_from_100_bytes"
-        ):
+        with add_time_taken(time_taken_log, "magic_file_type_1_from_100_bytes"):
             magic_file_type_1 = magic_worker.from_buffer(first_100_bytes)
     if not magic_file_type_1:
-        with add_time_taken(time_taken_log, "magic_file_type_1_from_file"):
-            try:
-                magic_file_type_1 = magic_worker.from_file(file_path)
-            except Exception:
-                # If there's an error loading the magic file type, just ignore
-                pass
+        with (
+            add_time_taken(time_taken_log, "magic_file_type_1_from_file"),
+            contextlib.suppress(Exception),
+        ):
+            # If there's an error loading the magic file type, just ignore.
+            magic_file_type_1 = magic_worker.from_file(file_path)
 
     # SHA256 hash, if file size < 100 KiB
     with add_time_taken(time_taken_log, "sha256_hash_1"):
         sha256_base64 = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
-            with open(file_path, "rb") as f:
+            with file_path.open("rb") as f:
                 sha256_hash = hashlib.sha256(f.read()).digest()
                 sha256_base64 = base64.b64encode(sha256_hash).decode("utf-8")
 
     with add_time_taken(time_taken_log, "md5_hash_hex_1"):
         md5_hash_hex = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
-            with open(file_path, "rb") as f:
+            with file_path.open("rb") as f:
                 md5_hash = hashlib.md5(f.read()).digest()
                 md5_hash_hex = binascii.hexlify(md5_hash).decode("utf-8")
 
@@ -313,22 +310,22 @@ def get_file_info(
             "sha256_base64": sha256_base64,
             "date_created": date_created,
             "date_modified": date_modified,
-            # "date_accessed": date_accessed,
             "magic_file_type_1": magic_file_type_1,
             "first_100_bytes": first_100_bytes,
             "last_100_bytes": last_100_bytes,
-            "timestamp_crawled": datetime.utcnow(),
+            "timestamp_crawled": datetime.now(timezone.utc),
             "indexing_start_timestamp": indexing_start_timestamp,
         }
-    return file_info
+    return file_info  # noqa: RET504
 
 
 def save_to_parquet(
     file_data: list[dict],
     output_folder: Path,
     input_folder: Path,
+    *,
     strip_prefix: bool = False,
-):
+) -> None:
     # Create a DataFrame from the file data
     df = pl.DataFrame(
         file_data,
@@ -358,12 +355,12 @@ def save_to_parquet(
                 .then(pl.col(col).str.slice(len(input_folder_str) + 1))
                 .otherwise(pl.col(col))
                 for col in ["file_path", "folder_path"]
-            ]
+            ],
         )
 
     output_parquet_file = output_folder / (
         "partial_file_index_"
-        f"{datetime.utcnow().strftime(DATETIME_FORMAT_FILES)}.parquet"
+        f"{datetime.now(timezone.utc).strftime(DATETIME_FORMAT_FILES)}.parquet"
     )
     logger.info(f"Saving {len(file_data):,} rows to {output_parquet_file}")
 
@@ -375,21 +372,19 @@ def save_to_parquet(
     )
 
 
-def merge_parquets(input_folder: Path, output_parquet_file: Path):
+def merge_parquets(input_folder: Path, output_parquet_file: Path) -> None:
     file_list = list(input_folder.glob("partial_file_index_*.parquet"))
     logger.info(
         f"Union-ing {len(file_list):,} parquet files in {input_folder} into "
-        f"{output_parquet_file}."
+        f"{output_parquet_file}.",
     )
 
-    scanned_dfs = []
-    for file in file_list:
-        scanned_dfs.append(pl.scan_parquet(file))
+    scanned_dfs: list[pl.LazyFrame] = [
+        pl.scan_parquet(parquet_path) for parquet_path in file_list
+    ]
 
     df = pl.concat(scanned_dfs)
-    df.sink_parquet(
-        output_parquet_file, compression="zstd", compression_level=22
-    )
+    df.sink_parquet(output_parquet_file, compression="zstd", compression_level=22)
     logger.info("Union-ed all files into a single Parquet file.")
 
     parquet_file_size_bytes = output_parquet_file.stat().st_size
@@ -399,14 +394,16 @@ def merge_parquets(input_folder: Path, output_parquet_file: Path):
     logger.info(
         f"Total file count after union: {total_file_count_in_parquet:,} files."
         f"Parquet file size: {parquet_file_size_bytes:,} bytes = "
-        f"{parquet_file_size_bytes / 1024 / 1024:.2f} MiB."
+        f"{parquet_file_size_bytes / 1024 / 1024:.2f} MiB.",
     )
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="List the files in a directory and store the data as "
-        "an index into a Parquet file."
+        description=(
+            "List the files in a directory and store the data as "
+            "an index into a Parquet file."
+        ),
     )
 
     parser.add_argument(
@@ -421,7 +418,7 @@ def parse_arguments():
         "--output-folder",
         required=True,
         type=str,
-        help="Path to the output folder where the Parquet file(s) will be stored",  # noqa
+        help="Path to the output folder where the Parquet file(s) will be stored",
     )
     parser.add_argument(
         "-s",
@@ -432,11 +429,10 @@ def parse_arguments():
         " relative to the input folder). Otherwise, absolute paths are used.",
     )
 
-    args = parser.parse_args()
-    return args
+    return parser.parse_args()
 
 
-def main_cli():
+def main_cli() -> None:
     logger.info("Starting file crawler...")
 
     args = parse_arguments()
@@ -445,8 +441,7 @@ def main_cli():
     output_folder = Path(args.output_folder)
 
     log_file_path = output_folder / (
-        "file_crawler_"
-        f"{indexing_start_timestamp.strftime(DATETIME_FORMAT_FILES)}.log"
+        f"file_crawler_{indexing_start_timestamp.strftime(DATETIME_FORMAT_FILES)}.log"
     )
     logger.add(log_file_path)
 
@@ -461,7 +456,8 @@ def main_cli():
         logger.info(f"Created output folder: {output_folder}")
 
     if not input_folder.exists():
-        raise ValueError(f"Input folder does not exist: {input_folder}")
+        msg = f"Input folder does not exist: {input_folder}"
+        raise ValueError(msg)
 
     (
         partial_storage_folder := (

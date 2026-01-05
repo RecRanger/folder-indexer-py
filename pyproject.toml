@@ -27,3 +27,10 @@ folder_indexer = "folder_indexer.indexer:main_cli"
 
 [dependency-groups]
 dev = ["pyright>=1.1.407", "pytest>=9.0.2", "ruff>=0.14.10"]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D", "S", "TD", "FIX", "COM812"]
