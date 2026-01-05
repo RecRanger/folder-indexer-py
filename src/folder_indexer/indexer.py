@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import os
 import tempfile
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -131,13 +132,11 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
     ):
         progress.total_file_count += 1
 
-        # if it's a link, skip it
-        if file_path.is_symlink():
+        if file_path.is_symlink():  # If it's a link, skip it.
             progress.link_file_count += 1
             continue
 
-        # if it's a thing like a named pipe, skip it
-        if not file_path.is_file():
+        if not file_path.is_file():  # If it's a thing like a named pipe, skip it.
             progress.notfile_file_count += 1
             continue
 
@@ -145,6 +144,8 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
             file_data: dict = get_file_info(
                 file_path=file_path,
                 time_taken_log=time_taken_log,
+                strip_prefix=strip_prefix,
+                input_folder=input_folder,
             )
             unwritten_file_data.append(file_data)
         except KeyboardInterrupt:
@@ -217,27 +218,17 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
 
         # Save the file data to a Parquet file
         with add_time_taken(time_taken_log, "save_to_parquet"):
-            if len(unwritten_file_data) % 10000 == 0:
+            if len(unwritten_file_data) % 10_000 == 0:
                 progress.parquet_saved_count += 1
-                save_to_parquet(
-                    unwritten_file_data,
-                    output_folder=output_folder,
-                    input_folder=input_folder,
-                    strip_prefix=strip_prefix,
-                )
-                unwritten_file_data = []
+                save_to_parquet(unwritten_file_data, output_folder=output_folder)
+                unwritten_file_data.clear()
 
         progress.success_file_count += 1
 
     logger.info("Reached end of looping through all files!")
 
     if len(unwritten_file_data) > 0:
-        save_to_parquet(
-            unwritten_file_data,
-            output_folder=output_folder,
-            input_folder=input_folder,
-            strip_prefix=strip_prefix,
-        )
+        save_to_parquet(unwritten_file_data, output_folder=output_folder)
     elif progress.total_file_count == 0:
         logger.warning(f"No files found in {input_folder}.")
 
@@ -245,7 +236,11 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
 
 
 def get_file_info(
-    file_path: Path, time_taken_log: dict[str, timedelta]
+    file_path: Path,
+    time_taken_log: dict[str, timedelta],
+    *,
+    strip_prefix: bool = False,
+    input_folder: Path,
 ) -> dict[str, Any]:
     with add_time_taken(time_taken_log, "stat_file"):
         # Getting file properties
@@ -303,10 +298,13 @@ def get_file_info(
 
     # Append file information to the list
     with add_time_taken(time_taken_log, "append_to_list"):
+        file_path_stripped: Path = (
+            file_path.relative_to(input_folder) if strip_prefix else file_path
+        )
         file_info = {
-            "file_path": str(file_path),
-            "folder_path": str(file_path.parent),
-            "file_name": str(file_path.name),
+            "file_path": file_path_stripped.as_posix(),
+            "folder_path": file_path_stripped.parent.as_posix(),
+            "file_name": file_path_stripped.name,
             "file_size_bytes": file_size,
             "md5_hex": md5_hash_hex,
             "sha256_base64": sha256_base64,
@@ -321,13 +319,7 @@ def get_file_info(
     return file_info  # noqa: RET504
 
 
-def save_to_parquet(
-    file_data: list[dict],
-    output_folder: Path,
-    input_folder: Path,
-    *,
-    strip_prefix: bool = False,
-) -> None:
+def save_to_parquet(file_data: list[dict[str, Any]], output_folder: Path) -> None:
     # Create a DataFrame from the file data
     df = pl.DataFrame(
         file_data,
@@ -339,7 +331,6 @@ def save_to_parquet(
             "sha256_base64": pl.String,
             "date_created": pl.Datetime,
             "date_modified": pl.Datetime,
-            "date_accessed": pl.Datetime,
             "magic_file_type_1": pl.String,
             "first_100_bytes": pl.Binary,
             "last_100_bytes": pl.Binary,
@@ -348,21 +339,8 @@ def save_to_parquet(
         },
     )
 
-    input_folder_str = str(input_folder).rstrip("/").rstrip("\\")
-
-    if strip_prefix:
-        df = df.with_columns(
-            [
-                pl.when(pl.col(col).str.starts_with(input_folder_str))
-                .then(pl.col(col).str.slice(len(input_folder_str) + 1))
-                .otherwise(pl.col(col))
-                for col in ["file_path", "folder_path"]
-            ],
-        )
-
     output_parquet_file = output_folder / (
-        "partial_file_index_"
-        f"{datetime.now(timezone.utc).strftime(DATETIME_FORMAT_FILES)}.parquet"
+        f"partial_file_index_{int(time.time() * 1e6)}.parquet"
     )
     logger.info(f"Saving {len(file_data):,} rows to {output_parquet_file}")
 
@@ -391,10 +369,11 @@ def merge_parquets(input_folder: Path, output_parquet_file: Path) -> None:
         pl.scan_parquet(output_parquet_file).select(pl.len()).collect().item()
     )
     logger.info(
-        f"Total file count after union: {total_file_count_in_parquet:,} files."
+        f"Total file count after union: {total_file_count_in_parquet:,} files. "
         f"Parquet file size: {parquet_file_size_bytes:,} bytes = "
         f"{parquet_file_size_bytes / 1024 / 1024:.2f} MiB.",
     )
+    logger.success(f"Saved merged Parquet file to {output_parquet_file}.")
 
 
 def run_file_indexer_and_merge(

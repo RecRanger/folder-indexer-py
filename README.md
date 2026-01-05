@@ -28,7 +28,6 @@ The output parquet file (`file_index.parquet`) has the following columns:
     * sha256_base64
     * date_created
     * date_modified
-    * date_accessed
     * magic_file_type_1
     * first_100_bytes
     * last_100_bytes
