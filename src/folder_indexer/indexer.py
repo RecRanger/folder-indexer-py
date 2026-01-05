@@ -5,13 +5,13 @@ import contextlib
 import hashlib
 import itertools
 import os
-import shutil
-import uuid
+import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import magic
 import polars as pl
@@ -47,7 +47,7 @@ class CrawlerProgressStoreSingleton:
     total_file_count: int = 0
     failed_file_count: int = 0
     link_file_count: int = 0
-    notfile_file_count: int = 0
+    notfile_file_count: int = 0  # Like named pipes, etc.
     success_file_count: int = 0
     parquet_saved_count: int = 0
 
@@ -221,8 +221,8 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
                 progress.parquet_saved_count += 1
                 save_to_parquet(
                     unwritten_file_data,
-                    output_folder,
-                    input_folder,
+                    output_folder=output_folder,
+                    input_folder=input_folder,
                     strip_prefix=strip_prefix,
                 )
                 unwritten_file_data = []
@@ -234,17 +234,19 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
     if len(unwritten_file_data) > 0:
         save_to_parquet(
             unwritten_file_data,
-            output_folder,
-            input_folder,
+            output_folder=output_folder,
+            input_folder=input_folder,
             strip_prefix=strip_prefix,
         )
-    else:
-        logger.info(f"No files found in {input_folder}.")
+    elif progress.total_file_count == 0:
+        logger.warning(f"No files found in {input_folder}.")
 
-    logger.info("Done.")
+    logger.info("Done indexing.")
 
 
-def get_file_info(file_path: Path, time_taken_log: dict[str, timedelta]) -> dict:
+def get_file_info(
+    file_path: Path, time_taken_log: dict[str, timedelta]
+) -> dict[str, Any]:
     with add_time_taken(time_taken_log, "stat_file"):
         # Getting file properties
         stat_info = file_path.stat()
@@ -373,18 +375,15 @@ def save_to_parquet(
 
 
 def merge_parquets(input_folder: Path, output_parquet_file: Path) -> None:
-    file_list = list(input_folder.glob("partial_file_index_*.parquet"))
+    file_list = sorted(input_folder.glob("partial_file_index_*.parquet"))
     logger.info(
         f"Union-ing {len(file_list):,} parquet files in {input_folder} into "
         f"{output_parquet_file}.",
     )
 
-    scanned_dfs: list[pl.LazyFrame] = [
-        pl.scan_parquet(parquet_path) for parquet_path in file_list
-    ]
-
-    df = pl.concat(scanned_dfs)
-    df.sink_parquet(output_parquet_file, compression="zstd", compression_level=22)
+    pl.concat(
+        [pl.scan_parquet(parquet_path) for parquet_path in file_list]
+    ).sink_parquet(output_parquet_file, compression="zstd", compression_level=22)
     logger.info("Union-ed all files into a single Parquet file.")
 
     parquet_file_size_bytes = output_parquet_file.stat().st_size
@@ -396,6 +395,28 @@ def merge_parquets(input_folder: Path, output_parquet_file: Path) -> None:
         f"Parquet file size: {parquet_file_size_bytes:,} bytes = "
         f"{parquet_file_size_bytes / 1024 / 1024:.2f} MiB.",
     )
+
+
+def run_file_indexer_and_merge(
+    input_folder: Path,
+    output_folder: Path,
+    *,
+    partial_storage_folder_override: Path | None = None,
+    strip_prefix: bool = False,
+) -> None:
+    with tempfile.TemporaryDirectory(
+        dir=partial_storage_folder_override
+    ) as partial_storage_folder:
+        run_file_indexer(
+            input_folder=input_folder,
+            output_folder=Path(partial_storage_folder),
+            strip_prefix=strip_prefix,
+        )
+
+        merge_parquets(
+            input_folder=Path(partial_storage_folder),
+            output_parquet_file=output_folder / "file_index.parquet",
+        )
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -424,9 +445,11 @@ def parse_arguments() -> argparse.Namespace:
         "-s",
         "--strip-prefix",
         action="store_true",
-        help="If set, removes the input folder prefix from the file paths, as "
-        "they get saved to the Parquet file (thus making them relative paths,"
-        " relative to the input folder). Otherwise, absolute paths are used.",
+        help=(
+            "If set, removes the input folder prefix from the file paths, as "
+            "they get saved to the Parquet file (thus making them relative paths,"
+            " relative to the input folder). Otherwise, absolute paths are used."
+        ),
     )
 
     return parser.parse_args()
@@ -441,7 +464,7 @@ def main_cli() -> None:
     output_folder = Path(args.output_folder)
 
     log_file_path = output_folder / (
-        f"file_crawler_{indexing_start_timestamp.strftime(DATETIME_FORMAT_FILES)}.log"
+        f"file_indexer_{indexing_start_timestamp.strftime(DATETIME_FORMAT_FILES)}.log"
     )
     logger.add(log_file_path)
 
@@ -451,6 +474,9 @@ def main_cli() -> None:
     logger.info(f"Output folder: {args.output_folder}")
     logger.info(f"Strip prefix?: {args.strip_prefix}")
 
+    if output_folder.is_file():
+        msg = f"Output folder is a file, not a folder: {output_folder}"
+        raise ValueError(msg)
     if not output_folder.exists():
         output_folder.mkdir(parents=True)
         logger.info(f"Created output folder: {output_folder}")
@@ -459,25 +485,12 @@ def main_cli() -> None:
         msg = f"Input folder does not exist: {input_folder}"
         raise ValueError(msg)
 
-    (
-        partial_storage_folder := (
-            output_folder / f"file_indexer_partial_storage_{uuid.uuid4()}"
-        )
-    ).mkdir()
-    logger.info(f"Created partial storage folder: {partial_storage_folder}")
-
-    run_file_indexer(
+    run_file_indexer_and_merge(
         input_folder=input_folder,
-        output_folder=partial_storage_folder,
+        output_folder=output_folder,
+        partial_storage_folder_override=None,  # Use system temp folder.
         strip_prefix=args.strip_prefix,
     )
-
-    merge_parquets(
-        input_folder=partial_storage_folder,
-        output_parquet_file=output_folder / "00_complete_file_index.parquet",
-    )
-
-    shutil.rmtree(partial_storage_folder)
 
     logger.info("Done.")
 

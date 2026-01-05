@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "folder_indexer"
 version = "0.1.1"
 authors = [{ name = "RecRanger", email = "RecRanger+package@proton.me" }]
-description = "A Python script to index a large folder into a parquet file, along with metadata"
+description = "A Python script to index a large folder structure into a parquet file, along with metadata"
 readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.10"
@@ -16,7 +16,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-dependencies = ["loguru", "polars", "python-magic", "tqdm"]
+dependencies = [
+    "loguru>0.7.0",
+    "polars>1.30",
+    "python-magic>=0.4.27",
+    "tqdm>=4.65.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/RecRanger/folder-indexer-py"

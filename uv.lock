@@ -43,10 +43,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "loguru" },
-    { name = "polars" },
-    { name = "python-magic" },
-    { name = "tqdm" },
+    { name = "loguru", specifier = ">0.7.0" },
+    { name = "polars", specifier = ">1.30" },
+    { name = "python-magic", specifier = ">=0.4.27" },
+    { name = "tqdm", specifier = ">=4.65.0" },
 ]
 
 [package.metadata.requires-dev]
