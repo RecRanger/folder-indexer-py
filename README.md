@@ -24,7 +24,7 @@ The output parquet file (`file_index.parquet`) has the following columns:
     * folder_path
     * file_name
     * file_size_bytes
-    * md5_hash_hex
+    * md5_hex
     * sha256_base64
     * date_created
     * date_modified
