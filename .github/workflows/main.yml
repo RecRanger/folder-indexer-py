@@ -31,6 +31,12 @@ jobs:
           # Important for versioning plugins:
           fetch-depth: 0
 
+      - name: Install libmagic (macOS only)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew update
+          brew install libmagic
+
       - name: Install uv (official Astral action)
         uses: astral-sh/setup-uv@v5
         with:
