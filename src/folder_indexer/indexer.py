@@ -269,22 +269,24 @@ def get_file_info(  # noqa: C901
         else:
             file_info["entry_kind"] = "other"
 
-    # Read the file's first and last 100 bytes
-    with add_time_taken(time_taken_log, "read_first_last_100_bytes"):
-        first_100_bytes = None
-        magic_file_type_1 = None
+    # Read the file's first and last 100 bytes.
+    first_100_bytes = None
+    magic_file_type_1 = None
+    with (
+        add_time_taken(time_taken_log, "read_first_last_100_bytes"),
+        contextlib.suppress(PermissionError),
+        file_path.open("rb") as f,
+    ):
+        # If there's an error reading the file, just ignore.
+        first_100_bytes = f.read(100)
+        file_info["first_100_bytes"] = first_100_bytes
 
-        with contextlib.suppress(Exception), file_path.open("rb") as f:
-            # If there's an error reading the file, just ignore.
-            first_100_bytes = f.read(100)
-            file_info["first_100_bytes"] = first_100_bytes
-
-            if ENABLE_STORING_LAST_100_BYTES:
-                if (file_size > 100) and (  # noqa: PLR2004
-                    file_size < BIG_FILE_SIZE_THRESHOLD_BYTES
-                ):
-                    f.seek(-100, os.SEEK_END)
-                file_info["last_100_bytes"] = f.read(100)
+        if ENABLE_STORING_LAST_100_BYTES:
+            if (file_size > 100) and (  # noqa: PLR2004
+                file_size < BIG_FILE_SIZE_THRESHOLD_BYTES
+            ):
+                f.seek(-100, os.SEEK_END)
+            file_info["last_100_bytes"] = f.read(100)
 
     with add_time_taken(time_taken_log, "construct_magic_worker"):
         magic_worker = magic.Magic()
@@ -295,19 +297,26 @@ def get_file_info(  # noqa: C901
     if not magic_file_type_1:
         with (
             add_time_taken(time_taken_log, "magic_file_type_1_from_file"),
-            contextlib.suppress(Exception),
+            contextlib.suppress(PermissionError),
         ):
             # If there's an error loading the magic file type, just ignore.
             magic_file_type_1 = magic_worker.from_file(file_path)
     file_info["magic_file_type_1"] = magic_file_type_1
 
-    # SHA256 hash, if file size < 100 KiB
-    with add_time_taken(time_taken_log, "sha256_base64"):
+    # SHA256 hash, if file size is small enough.
+    with (
+        add_time_taken(time_taken_log, "sha256_base64"),
+        contextlib.suppress(PermissionError),
+    ):
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
             sha256_hash = hashlib.sha256(file_path.read_bytes()).digest()
             file_info["sha256_base64"] = base64.b64encode(sha256_hash).decode("utf-8")
 
-    with add_time_taken(time_taken_log, "md5_hex"):
+    # MD5 hash, if file size is small enough.
+    with (
+        add_time_taken(time_taken_log, "md5_hex"),
+        contextlib.suppress(PermissionError),
+    ):
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
             md5_hash = hashlib.md5(file_path.read_bytes()).digest()
             file_info["md5_hex"] = binascii.hexlify(md5_hash).decode("utf-8")
