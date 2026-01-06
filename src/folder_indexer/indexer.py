@@ -47,8 +47,6 @@ def add_time_taken(
 class CrawlerProgressStoreSingleton:
     total_file_count: int = 0
     failed_file_count: int = 0
-    link_file_count: int = 0
-    notfile_file_count: int = 0  # Like named pipes, etc.
     success_file_count: int = 0
     parquet_saved_count: int = 0
 
@@ -63,14 +61,12 @@ class CrawlerProgressStoreSingleton:
                 f"{self.total_file_count:,} files processed @ {self.files_per_sec:.2f} files/sec.",  # noqa: E501
                 f"{self.failed_file_count:,} failed ({self.failed_file_count / self.total_file_count:.2%}).",  # noqa: E501
                 f"{self.parquet_saved_count:,} parquets saved.",
-                f"{self.link_file_count:,} links skipped.",
-                f"{self.notfile_file_count:,} notfiles skipped (e.g., named pipes).",
                 f"{self.success_file_count:,} successful files indexed.",
             ],
         )
 
 
-def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
+def run_file_indexer(  # noqa: C901, PLR0915
     input_folder: Path,
     output_folder: Path,
     *,
@@ -131,14 +127,6 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
         smoothing=(1 / tqdm_average_over_files),
     ):
         progress.total_file_count += 1
-
-        if file_path.is_symlink():  # If it's a link, skip it.
-            progress.link_file_count += 1
-            continue
-
-        if not file_path.is_file():  # If it's a thing like a named pipe, skip it.
-            progress.notfile_file_count += 1
-            continue
 
         try:
             file_data: dict = get_file_info(
