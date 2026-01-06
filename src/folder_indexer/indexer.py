@@ -244,8 +244,7 @@ def get_file_info(  # noqa: C901
         # Getting file properties.
         try:
             stat_info = file_path.stat()
-        except PermissionError as e:
-            logger.warning(f"Permission denied: {file_path}. Error: {e}")
+        except PermissionError:
             file_info["entry_kind"] = "permission_denied"
             return file_info  # Nothing else will work, so just return!
 
