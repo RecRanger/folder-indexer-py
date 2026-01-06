@@ -235,37 +235,68 @@ def run_file_indexer(  # noqa: C901, PLR0912, PLR0915
     logger.info("Done indexing.")
 
 
-def get_file_info(
+def get_file_info(  # noqa: C901
     file_path: Path,
     time_taken_log: dict[str, timedelta],
     *,
     strip_prefix: bool = False,
     input_folder: Path,
 ) -> dict[str, Any]:
+    file_path_stripped: Path = (
+        file_path.relative_to(input_folder) if strip_prefix else file_path
+    )
+    file_info: dict[str, Any] = {
+        "file_path": file_path_stripped.as_posix(),
+        "folder_path": file_path_stripped.parent.as_posix(),
+        "file_name": file_path_stripped.name,
+        "timestamp_crawled": datetime.now(timezone.utc),
+        "indexing_start_timestamp": indexing_start_timestamp,
+    }
     with add_time_taken(time_taken_log, "stat_file"):
-        # Getting file properties
-        stat_info = file_path.stat()
+        # Getting file properties.
+        try:
+            stat_info = file_path.stat()
+        except PermissionError as e:
+            logger.warning(f"Permission denied: {file_path}. Error: {e}")
+            file_info["entry_kind"] = "permission_denied"
+            return file_info  # Nothing else will work, so just return!
 
     with add_time_taken(time_taken_log, "extract_file_info"):
         file_size = stat_info.st_size
-        date_created = datetime.fromtimestamp(stat_info.st_ctime, timezone.utc)
-        date_modified = datetime.fromtimestamp(stat_info.st_mtime, timezone.utc)
+        file_info["file_size_bytes"] = file_size
+        file_info["date_created"] = datetime.fromtimestamp(
+            stat_info.st_ctime, timezone.utc
+        )
+        file_info["date_modified"] = datetime.fromtimestamp(
+            stat_info.st_mtime, timezone.utc
+        )
+        if file_path.is_file():
+            file_info["entry_kind"] = "file"
+        elif file_path.is_dir():
+            file_info["entry_kind"] = "directory"
+        elif file_path.is_symlink():
+            file_info["entry_kind"] = "symlink"
+        elif os.path.ismount(file_path):
+            file_info["entry_kind"] = "mount_point"
+        else:
+            file_info["entry_kind"] = "other"
 
     # Read the file's first and last 100 bytes
     with add_time_taken(time_taken_log, "read_first_last_100_bytes"):
-        first_100_bytes = last_100_bytes = None
+        first_100_bytes = None
         magic_file_type_1 = None
 
         with contextlib.suppress(Exception), file_path.open("rb") as f:
             # If there's an error reading the file, just ignore.
             first_100_bytes = f.read(100)
+            file_info["first_100_bytes"] = first_100_bytes
 
             if ENABLE_STORING_LAST_100_BYTES:
                 if (file_size > 100) and (  # noqa: PLR2004
                     file_size < BIG_FILE_SIZE_THRESHOLD_BYTES
                 ):
                     f.seek(-100, os.SEEK_END)
-                last_100_bytes = f.read(100)
+                file_info["last_100_bytes"] = f.read(100)
 
     with add_time_taken(time_taken_log, "construct_magic_worker"):
         magic_worker = magic.Magic()
@@ -280,41 +311,20 @@ def get_file_info(
         ):
             # If there's an error loading the magic file type, just ignore.
             magic_file_type_1 = magic_worker.from_file(file_path)
+    file_info["magic_file_type_1"] = magic_file_type_1
 
     # SHA256 hash, if file size < 100 KiB
     with add_time_taken(time_taken_log, "sha256_base64"):
-        sha256_base64 = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
             sha256_hash = hashlib.sha256(file_path.read_bytes()).digest()
-            sha256_base64 = base64.b64encode(sha256_hash).decode("utf-8")
+            file_info["sha256_base64"] = base64.b64encode(sha256_hash).decode("utf-8")
 
     with add_time_taken(time_taken_log, "md5_hex"):
-        md5_hex = None
         if file_size < BIG_FILE_SIZE_THRESHOLD_BYTES:
             md5_hash = hashlib.md5(file_path.read_bytes()).digest()
-            md5_hex = binascii.hexlify(md5_hash).decode("utf-8")
+            file_info["md5_hex"] = binascii.hexlify(md5_hash).decode("utf-8")
 
-    # Append file information to the list
-    with add_time_taken(time_taken_log, "append_to_list"):
-        file_path_stripped: Path = (
-            file_path.relative_to(input_folder) if strip_prefix else file_path
-        )
-        file_info = {
-            "file_path": file_path_stripped.as_posix(),
-            "folder_path": file_path_stripped.parent.as_posix(),
-            "file_name": file_path_stripped.name,
-            "file_size_bytes": file_size,
-            "md5_hex": md5_hex,
-            "sha256_base64": sha256_base64,
-            "date_created": date_created,
-            "date_modified": date_modified,
-            "magic_file_type_1": magic_file_type_1,
-            "first_100_bytes": first_100_bytes,
-            "last_100_bytes": last_100_bytes,
-            "timestamp_crawled": datetime.now(timezone.utc),
-            "indexing_start_timestamp": indexing_start_timestamp,
-        }
-    return file_info  # noqa: RET504
+    return file_info
 
 
 def save_to_parquet(file_data: list[dict[str, Any]], output_folder: Path) -> None:
@@ -326,6 +336,16 @@ def save_to_parquet(file_data: list[dict[str, Any]], output_folder: Path) -> Non
             "folder_path": pl.String,
             "file_name": pl.String,
             "file_size_bytes": pl.UInt64,
+            "entry_kind": pl.Enum(
+                [
+                    "file",
+                    "directory",
+                    "symlink",
+                    "mount_point",
+                    "other",
+                    "permission_denied",
+                ]
+            ),
             "md5_hex": pl.String,
             "sha256_base64": pl.String,
             "date_created": pl.Datetime,

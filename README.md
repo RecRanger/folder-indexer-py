@@ -20,16 +20,17 @@ folder_indexer -i /path/to/input/folder -o /path/to/output/folder
 
 The output parquet file (`file_index.parquet`) has the following columns:
 
-    * file_path
-    * folder_path
-    * file_name
-    * file_size_bytes
-    * md5_hex
-    * sha256_base64
-    * date_created
-    * date_modified
-    * magic_file_type_1
-    * first_100_bytes
-    * last_100_bytes
-    * timestamp_crawled
-    * indexing_start_timestamp
+* file_path
+* folder_path
+* file_name
+* file_size_bytes
+* entry_kind
+* md5_hex
+* sha256_base64
+* date_created
+* date_modified
+* magic_file_type_1
+* first_100_bytes
+* last_100_bytes
+* timestamp_crawled
+* indexing_start_timestamp
